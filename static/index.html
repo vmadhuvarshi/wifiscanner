@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WiFi Scanner — Radar</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      overflow: hidden;
+      background: #0b0e17;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      color: #c8cdd5;
+      display: flex;
+      height: 100vh;
+    }
+
+    /* ---------- Left Panel ---------- */
+    #panel {
+      width: 280px;
+      min-width: 280px;
+      background: #0f1219;
+      border-right: 1px solid #1c2030;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      z-index: 10;
+    }
+
+    .panel-header {
+      padding: 12px 14px 10px;
+      border-bottom: 1px solid #1c2030;
+    }
+    .panel-header h1 {
+      font-size: 14px;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: 0.5px;
+    }
+    .panel-header .network-name {
+      font-size: 13px;
+      color: #38bdf8;
+      margin-top: 3px;
+      font-weight: 600;
+    }
+    .panel-header .network-meta {
+      font-size: 10px;
+      color: #5a6275;
+      margin-top: 1px;
+    }
+
+    .metrics-section {
+      padding: 4px 6px;
+      flex: 1;
+    }
+
+    .metric-card {
+      display: flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 4px;
+      height: 28px;
+    }
+    .metric-card:hover { background: #161b26; }
+
+    .metric-label {
+      font-size: 10px;
+      color: #5a6275;
+      width: 90px;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    .metric-value {
+      font-size: 12px;
+      font-weight: 700;
+      color: #e4e8ef;
+      font-variant-numeric: tabular-nums;
+      width: 72px;
+      flex-shrink: 0;
+      text-align: right;
+    }
+    .metric-value.good { color: #34d399; }
+    .metric-value.warn { color: #fbbf24; }
+    .metric-value.bad  { color: #f87171; }
+    .metric-value.na   { color: #3d4455; }
+
+    .metric-sparkline {
+      flex: 1;
+      min-width: 0;
+      margin-left: 6px;
+    }
+    .metric-sparkline svg {
+      display: block;
+      width: 100%;
+      height: 18px;
+    }
+
+    .section-divider {
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #3d4455;
+      padding: 6px 8px 2px;
+      font-weight: 700;
+    }
+
+    /* Speed test */
+    #speedtest-area {
+      padding: 8px 14px 10px;
+      border-top: 1px solid #1c2030;
+    }
+    #speedtest-btn {
+      width: 100%;
+      padding: 7px;
+      background: #1e40af;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    #speedtest-btn:hover { background: #2563eb; }
+    #speedtest-btn:disabled {
+      background: #1a2030;
+      color: #4a5060;
+      cursor: default;
+    }
+    #speedtest-result {
+      font-size: 12px;
+      margin-top: 4px;
+      text-align: center;
+      color: #8892a6;
+      min-height: 18px;
+    }
+    #speedtest-result .speed-value {
+      font-size: 18px;
+      font-weight: 700;
+      color: #38bdf8;
+    }
+
+    /* ---------- Right: Radar Area ---------- */
+    #radar-area {
+      flex: 1;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #radar-canvas {
+      display: block;
+    }
+
+    /* Disconnected overlay */
+    .disconnected-msg {
+      color: #3d4455;
+      font-size: 12px;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <div id="panel">
+    <div class="panel-header">
+      <h1>WiFi Scanner</h1>
+      <div class="network-name" id="connected-ssid">Scanning...</div>
+      <div class="network-meta" id="connected-meta"></div>
+    </div>
+    <div class="metrics-section" id="metrics-section">
+      <!-- Metrics injected by JS -->
+    </div>
+    <div id="speedtest-area">
+      <button id="speedtest-btn" onclick="runSpeedTest()">Run Speed Test</button>
+      <div id="speedtest-result"></div>
+    </div>
+  </div>
+
+  <div id="radar-area">
+    <canvas id="radar-canvas"></canvas>
+  </div>
+
+  <script>
+  // =======================================================================
+  // State
+  // =======================================================================
+  let diagData = null;       // latest diagnostics response
+  let networksData = [];     // latest network scan
+  let sweepAngle = 0;        // radar sweep angle
+
+  // Metric definitions for the left panel
+  const METRICS = [
+    { section: "Signal" },
+    { key: "signal_percent", label: "Quality",       unit: "%",    good: [60,100], warn: [30,60], decimals: 0 },
+    { key: "snr",            label: "SNR",            unit: " dB",  good: [25,100], warn: [15,25], decimals: 0 },
+    { key: "rssi",           label: "RSSI",           unit: " dBm", good: [-55,0],  warn: [-70,-55], decimals: 0, invert: true },
+    { key: "noise",          label: "Noise Floor",    unit: " dBm", good: [-100,-85], warn: [-85,-75], decimals: 0, invert: true },
+    { section: "Speed" },
+    { key: "rx_rate",        label: "Rx Rate",        unit: " Mbps", good: [100,10000], warn: [30,100], decimals: 0 },
+    { key: "tx_rate",        label: "Tx Rate",        unit: " Mbps", good: [100,10000], warn: [30,100], decimals: 0 },
+    { section: "Router" },
+    { key: "router_ping",    label: "Router Ping",    unit: " ms",  good: [0,10],   warn: [10,50], decimals: 1, lowerBetter: true },
+    { key: "router_jitter",  label: "Router Jitter",  unit: " ms",  good: [0,5],    warn: [5,20],  decimals: 1, lowerBetter: true },
+    { key: "router_loss",    label: "Router Loss",    unit: "%",    good: [0,1],    warn: [1,5],   decimals: 1, lowerBetter: true },
+    { section: "Internet" },
+    { key: "internet_ping",   label: "Internet Ping",  unit: " ms",  good: [0,30],  warn: [30,80], decimals: 1, lowerBetter: true },
+    { key: "internet_jitter", label: "Internet Jitter", unit: " ms", good: [0,10],  warn: [10,30], decimals: 1, lowerBetter: true },
+    { key: "internet_loss",   label: "Internet Loss",  unit: "%",   good: [0,1],   warn: [1,5],   decimals: 1, lowerBetter: true },
+    { section: "Network" },
+    { key: "dns_lookup",      label: "DNS Lookup",     unit: " ms",  good: [0,30],  warn: [30,100], decimals: 1, lowerBetter: true },
+    { key: "tcp_established", label: "TCP Active",     unit: "",     good: [0,200], warn: [200,500], decimals: 0 },
+    { key: "tcp_close_wait",  label: "TCP Close-Wait", unit: "",     good: [0,5],   warn: [5,20],   decimals: 0, lowerBetter: true },
+  ];
+
+  // =======================================================================
+  // Panel: build metric cards
+  // =======================================================================
+  const metricsEl = document.getElementById("metrics-section");
+
+  function buildMetricCards() {
+    metricsEl.innerHTML = "";
+    for (const m of METRICS) {
+      if (m.section) {
+        const div = document.createElement("div");
+        div.className = "section-divider";
+        div.textContent = m.section;
+        metricsEl.appendChild(div);
+        continue;
+      }
+      const card = document.createElement("div");
+      card.className = "metric-card";
+      card.id = `metric-${m.key}`;
+      card.innerHTML = `
+        <div class="metric-label">${m.label}</div>
+        <div class="metric-value na" id="val-${m.key}">--</div>
+        <div class="metric-sparkline" id="spark-${m.key}">
+          <svg viewBox="0 0 80 18" preserveAspectRatio="none"></svg>
+        </div>
+      `;
+      metricsEl.appendChild(card);
+    }
+  }
+  buildMetricCards();
+
+  // =======================================================================
+  // Panel: update values and sparklines
+  // =======================================================================
+  function classifyValue(val, m) {
+    if (val === null || val === undefined) return "na";
+    const [gMin, gMax] = m.good;
+    const [wMin, wMax] = m.warn;
+    if (val >= gMin && val <= gMax) return "good";
+    if (val >= wMin && val <= wMax) return "warn";
+    return "bad";
+  }
+
+  function sparklineColor(cls) {
+    if (cls === "good") return "#34d399";
+    if (cls === "warn") return "#fbbf24";
+    if (cls === "bad") return "#f87171";
+    return "#2a2f40";
+  }
+
+  function updatePanel() {
+    if (!diagData) return;
+    const cur = diagData.current;
+    const hist = diagData.history;
+
+    // Header
+    const ssidEl = document.getElementById("connected-ssid");
+    const metaEl = document.getElementById("connected-meta");
+    if (cur.connected) {
+      ssidEl.textContent = cur.ssid || "Unknown Network";
+      ssidEl.style.color = "#38bdf8";
+      const parts = [];
+      if (cur.channel) parts.push(`Ch ${cur.channel}`);
+      if (cur.band) parts.push(cur.band);
+      if (cur.radio_type) parts.push(cur.radio_type);
+      if (cur.auth) parts.push(cur.auth);
+      metaEl.textContent = parts.join("  ·  ");
+    } else {
+      ssidEl.textContent = "Not Connected";
+      ssidEl.style.color = "#f87171";
+      metaEl.textContent = "";
+    }
+
+    // Metric values
+    for (const m of METRICS) {
+      if (m.section) continue;
+      const valEl = document.getElementById(`val-${m.key}`);
+      const sparkEl = document.getElementById(`spark-${m.key}`);
+      if (!valEl) continue;
+
+      const val = cur[m.key];
+      const cls = classifyValue(val, m);
+
+      if (val === null || val === undefined) {
+        valEl.textContent = "N/A";
+        valEl.className = "metric-value na";
+      } else {
+        valEl.textContent = (typeof val === "number" ? val.toFixed(m.decimals) : val) + (m.unit || "");
+        valEl.className = `metric-value ${cls}`;
+      }
+
+      // Sparkline
+      if (sparkEl && hist && hist[m.key]) {
+        const data = hist[m.key];
+        renderSparkline(sparkEl.querySelector("svg"), data, sparklineColor(cls), m);
+      }
+    }
+  }
+
+  function renderSparkline(svg, data, color, m) {
+    const nums = data.filter(v => v !== null && v !== undefined);
+    if (nums.length < 2) {
+      svg.innerHTML = "";
+      return;
+    }
+
+    const w = 80, h = 18, pad = 1;
+    let min = Math.min(...nums);
+    let max = Math.max(...nums);
+    if (max === min) { max += 1; min -= 1; }
+
+    const points = [];
+    for (let i = 0; i < data.length; i++) {
+      if (data[i] === null || data[i] === undefined) continue;
+      const x = pad + (i / (data.length - 1)) * (w - pad * 2);
+      const y = pad + (1 - (data[i] - min) / (max - min)) * (h - pad * 2);
+      points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+
+    svg.innerHTML = `<polyline fill="none" stroke="${color}" stroke-width="1.2" stroke-linejoin="round" stroke-linecap="round" points="${points.join(" ")}" opacity="0.8"/>`;
+  }
+
+  // =======================================================================
+  // Radar Canvas
+  // =======================================================================
+  const canvas = document.getElementById("radar-canvas");
+  const ctx = canvas.getContext("2d");
+  let radarCx, radarCy, radarR;
+
+  function resizeCanvas() {
+    const area = document.getElementById("radar-area");
+    canvas.width = area.clientWidth;
+    canvas.height = area.clientHeight;
+    radarR = Math.min(canvas.width, canvas.height) * 0.42;
+    radarCx = canvas.width / 2;
+    radarCy = canvas.height / 2;
+  }
+  window.addEventListener("resize", resizeCanvas);
+  resizeCanvas();
+
+  /** Hash BSSID to a stable angle in [0, 2PI). */
+  function bssidAngle(bssid) {
+    let hash = 0;
+    for (let i = 0; i < bssid.length; i++) {
+      hash = ((hash << 5) - hash + bssid.charCodeAt(i)) | 0;
+    }
+    return ((hash % 3600) / 3600) * Math.PI * 2;
+  }
+
+  /** Signal quality text. */
+  function qualityText(pct) {
+    if (pct >= 80) return "Excellent!";
+    if (pct >= 60) return "Great spot!";
+    if (pct >= 40) return "Decent";
+    if (pct >= 20) return "Weak signal";
+    return "Very weak";
+  }
+
+  function drawRadar() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Concentric rings
+    const rings = 4;
+    for (let i = 1; i <= rings; i++) {
+      const r = (i / rings) * radarR;
+      ctx.beginPath();
+      ctx.arc(radarCx, radarCy, r, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(56, 75, 112, ${0.15 + i * 0.05})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // Cross lines
+    for (let a = 0; a < 4; a++) {
+      const angle = (a / 4) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(radarCx, radarCy);
+      ctx.lineTo(radarCx + Math.cos(angle) * radarR, radarCy + Math.sin(angle) * radarR);
+      ctx.strokeStyle = "rgba(56, 75, 112, 0.12)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // Ring labels (signal zones)
+    ctx.font = "10px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillStyle = "rgba(90, 98, 117, 0.5)";
+    ctx.textAlign = "left";
+    const labels = ["-30", "-50", "-70", "-90"];
+    for (let i = 0; i < rings; i++) {
+      const r = ((i + 1) / rings) * radarR;
+      ctx.fillText(labels[i] + " dBm", radarCx + 4, radarCy - r + 12);
+    }
+
+    // Sweep line
+    const sweepX = radarCx + Math.cos(sweepAngle) * radarR;
+    const sweepY = radarCy + Math.sin(sweepAngle) * radarR;
+
+    // Sweep gradient trail
+    const grad = ctx.createConicalGradient ? null : null; // fallback
+    ctx.beginPath();
+    ctx.moveTo(radarCx, radarCy);
+    ctx.arc(radarCx, radarCy, radarR, sweepAngle - 0.5, sweepAngle);
+    ctx.closePath();
+    const sweepGrad = ctx.createRadialGradient(radarCx, radarCy, 0, radarCx, radarCy, radarR);
+    sweepGrad.addColorStop(0, "rgba(56, 189, 248, 0.08)");
+    sweepGrad.addColorStop(1, "rgba(56, 189, 248, 0.02)");
+    ctx.fillStyle = sweepGrad;
+    ctx.fill();
+
+    // Sweep line itself
+    ctx.beginPath();
+    ctx.moveTo(radarCx, radarCy);
+    ctx.lineTo(sweepX, sweepY);
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.5)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Connected BSSID for highlighting
+    const connectedBSSID = diagData?.current?.bssid || "";
+
+    // Draw network blips
+    for (const net of networksData) {
+      if (!net.bssid) continue;
+      const angle = bssidAngle(net.bssid);
+      // Distance: stronger signal = closer to center
+      // rssi ranges from roughly -30 (strong) to -100 (weak)
+      const signalNorm = Math.max(0, Math.min(1, (net.rssi + 100) / 70)); // 0=weak, 1=strong
+      const dist = radarR * (1 - signalNorm * 0.85) * 0.95 + radarR * 0.05;
+
+      const bx = radarCx + Math.cos(angle) * dist;
+      const by = radarCy + Math.sin(angle) * dist;
+
+      const isConnected = net.bssid === connectedBSSID;
+
+      // Blip glow
+      const glowR = isConnected ? 14 : 8;
+      const glowGrad = ctx.createRadialGradient(bx, by, 0, bx, by, glowR);
+      if (isConnected) {
+        glowGrad.addColorStop(0, "rgba(56, 189, 248, 0.6)");
+        glowGrad.addColorStop(1, "rgba(56, 189, 248, 0)");
+      } else {
+        const c = signalNorm > 0.6 ? "52, 211, 153" : signalNorm > 0.3 ? "251, 191, 36" : "248, 113, 113";
+        glowGrad.addColorStop(0, `rgba(${c}, 0.5)`);
+        glowGrad.addColorStop(1, `rgba(${c}, 0)`);
+      }
+      ctx.beginPath();
+      ctx.arc(bx, by, glowR, 0, Math.PI * 2);
+      ctx.fillStyle = glowGrad;
+      ctx.fill();
+
+      // Blip dot
+      ctx.beginPath();
+      ctx.arc(bx, by, isConnected ? 5 : 3, 0, Math.PI * 2);
+      if (isConnected) {
+        ctx.fillStyle = "#38bdf8";
+      } else if (signalNorm > 0.6) {
+        ctx.fillStyle = "#34d399";
+      } else if (signalNorm > 0.3) {
+        ctx.fillStyle = "#fbbf24";
+      } else {
+        ctx.fillStyle = "#f87171";
+      }
+      ctx.fill();
+
+      // Connected checkmark
+      if (isConnected) {
+        ctx.beginPath();
+        ctx.arc(bx, by, 8, 0, Math.PI * 2);
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      // SSID label
+      const ssidText = net.ssid || "Hidden";
+      ctx.font = `${isConnected ? "bold 11px" : "10px"} 'Segoe UI', system-ui, sans-serif`;
+      ctx.fillStyle = isConnected ? "#38bdf8" : "rgba(200, 205, 213, 0.7)";
+      ctx.textAlign = "center";
+      ctx.fillText(ssidText, bx, by - (isConnected ? 14 : 10));
+    }
+
+    // Center score
+    const sigPct = diagData?.current?.signal_percent;
+    if (diagData?.current?.connected && sigPct !== undefined) {
+      // Score number
+      ctx.font = "bold 42px 'Segoe UI', system-ui, sans-serif";
+      ctx.fillStyle = "#fff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(sigPct, radarCx, radarCy - 8);
+
+      // Assessment text
+      ctx.font = "13px 'Segoe UI', system-ui, sans-serif";
+      ctx.fillStyle = sigPct >= 60 ? "#34d399" : sigPct >= 30 ? "#fbbf24" : "#f87171";
+      ctx.fillText(qualityText(sigPct), radarCx, radarCy + 22);
+
+      // Small unit label
+      ctx.font = "10px 'Segoe UI', system-ui, sans-serif";
+      ctx.fillStyle = "#5a6275";
+      ctx.fillText("signal quality", radarCx, radarCy + 38);
+    } else {
+      ctx.font = "14px 'Segoe UI', system-ui, sans-serif";
+      ctx.fillStyle = "#3d4455";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("No WiFi connection", radarCx, radarCy);
+    }
+
+    ctx.textBaseline = "alphabetic"; // reset
+  }
+
+  // =======================================================================
+  // Animation loop
+  // =======================================================================
+  let lastFrame = 0;
+  function animate(ts) {
+    requestAnimationFrame(animate);
+    const dt = (ts - lastFrame) / 1000;
+    lastFrame = ts;
+
+    sweepAngle += dt * 0.8; // ~0.8 rad/s
+    if (sweepAngle > Math.PI * 2) sweepAngle -= Math.PI * 2;
+
+    drawRadar();
+  }
+  requestAnimationFrame(animate);
+
+  // =======================================================================
+  // Data polling
+  // =======================================================================
+  async function fetchDiagnostics() {
+    try {
+      const res = await fetch("/api/diagnostics");
+      diagData = await res.json();
+      updatePanel();
+    } catch {
+      // silent
+    }
+  }
+
+  async function fetchNetworks() {
+    try {
+      const res = await fetch("/api/networks");
+      const data = await res.json();
+      networksData = data.networks || [];
+    } catch {
+      // silent
+    }
+  }
+
+  // Initial fetch
+  fetchDiagnostics();
+  fetchNetworks();
+
+  // Poll
+  setInterval(fetchDiagnostics, 2000);
+  setInterval(fetchNetworks, 5000);
+
+  // =======================================================================
+  // Speed Test
+  // =======================================================================
+  async function runSpeedTest() {
+    const btn = document.getElementById("speedtest-btn");
+    const resultEl = document.getElementById("speedtest-result");
+
+    btn.disabled = true;
+    btn.textContent = "Testing...";
+    resultEl.innerHTML = '<span style="color:#5a6275">Running speed test...</span>';
+
+    try {
+      const res = await fetch("/api/speedtest", { method: "POST" });
+      const data = await res.json();
+
+      if (data.success) {
+        const dl = (data.download_mbps != null) ? data.download_mbps : "—";
+        const ul = (data.upload_mbps != null) ? data.upload_mbps : "—";
+        const dlErr = data.download_error ? ' <span style="color:#f87171;font-size:9px">err</span>' : '';
+        const ulErr = data.upload_error ? ' <span style="color:#f87171;font-size:9px">err</span>' : '';
+        resultEl.innerHTML =
+          `<span style="color:#5a6275;font-size:10px">DOWN</span> <span class="speed-value">${dl}</span> <span style="color:#5a6275">Mbps</span>${dlErr}` +
+          `<span style="color:#2a2f40;margin:0 6px">|</span>` +
+          `<span style="color:#5a6275;font-size:10px">UP</span> <span class="speed-value" style="color:#a78bfa">${ul}</span> <span style="color:#5a6275">Mbps</span>${ulErr}`;
+      } else {
+        resultEl.innerHTML = `<span style="color:#f87171">Test failed</span>`;
+      }
+    } catch (e) {
+      resultEl.innerHTML = `<span style="color:#f87171">Error: ${e.message}</span>`;
+    }
+
+    btn.disabled = false;
+    btn.textContent = "Run Speed Test";
+  }
+  // Expose to onclick
+  window.runSpeedTest = runSpeedTest;
+  </script>
+</body>
+</html>
