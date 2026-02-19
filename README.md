@@ -2,7 +2,7 @@
 
 A real-time WiFi diagnostics tool with a radar-style visualization. Scans nearby networks, displays signal quality metrics with sparkline graphs, and includes a built-in speed test.
 
-![WiFi Scanner Screenshot]([https://github.com/user-attachments/assets/placeholder.png](https://github.com/vmadhuvarshi/wifiscanner/blob/main/screenshot.png))
+![WiFi Scanner Screenshot](https://github.com/vmadhuvarshi/wifiscanner/blob/main/screenshot.png)
 
 ## Features
 
